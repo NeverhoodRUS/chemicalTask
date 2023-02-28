@@ -1,12 +1,11 @@
 #include "chemicalModel.h"
 #include "appstrings.h"
-#include <QDebug>
 
 ChemicalModel::ChemicalModel() :
     _errorElementPrefix("Error "),
-    _validator(new ChemicalValidator())
+    _validator(new ChemicalValidator()),
+    _closedStatuses{SQUARE_OPENED_ROUND_CLOSED, SQUARE_CLOSED, ROUND_CLOSED}
 {
-    _splittRegExp.setPattern("[A-Z][^A-Z]*");
 }
 
 QMap<QString, int> ChemicalModel::analyzeString(const QString &inputString)
@@ -15,93 +14,64 @@ QMap<QString, int> ChemicalModel::analyzeString(const QString &inputString)
         throw std::invalid_argument(ExceptionStrings::incorrectSequence);
     QMap<QString/*chemical element*/, int/*element's count*/> resultMap;
     QString element;
-    QMap<QString, int> squareElems;
-    QMap<QString, int> roundElems;
+    QMap<QString, int> squareElems; //Elements inside square brackets
+    QMap<QString, int> roundElems; //Elements inside round brackets
 
     _status = NO_BRACKETS;
 
     for(int i(0); i < inputString.size(); ++i)
     {
         const QString itEl = inputString.at(i);
-        if(Constants::finishElementChars.contains(itEl) || itEl.toInt() > 0)
+        changeStatus(itEl);
+        //Если элемент не является элементом обозначающим, что предыдущий элемент завершён и статус не является статусом,
+        // при котором происходит подсчёт кол-ва элементов внутри скобок, и элемент не является числом элемента
+        if((Constants::finishElementChars.contains(itEl) && !_closedStatuses.contains(_status)) || itEl.toInt())
             continue;
         element.append(itEl);
+        //Следующий элемент итерации
         const QString &nextElement = (i < inputString.size()-1)? QString{inputString.at(i+1)} : "";
+        //флаг обозначающий завершённость элемента
         const bool elementCompiled = Constants::finishElementChars.contains(nextElement) || nextElement.isUpper()
                 || nextElement.isEmpty() || nextElement.toInt() > 0;
         if(!elementCompiled)
             continue;
-        if(!Constants::chemicalElements.contains(element))
-            throw std::invalid_argument(ExceptionStrings::incorrectElement + " " + element.toStdString());
-        changeStatus(itEl);
-
+        //Если элемент некорректен
+        if(!Constants::chemicalElements.contains(element) && !_closedStatuses.contains(_status)) {
+            resultMap.insert(_errorElementPrefix + element, 1);
+            element.clear();
+            continue;
+        }
+        //Действия согласно статусам хода итерации
         switch (_status) {
-        case NO_BRACKETS:
-        {
+        //Если элемент не находится внутри скобок
+        case NO_BRACKETS: {
             insertElementToMap(resultMap, nextElement, element);
             element.clear();
             break;
         }
-        case SQUARE_OPENED:
-        {
+        //Если элемент находится внутри квадратных скобок
+        case SQUARE_OPENED: {
             insertElementToMap(squareElems, nextElement, element);
             element.clear();
             break;
         }
+        //Если элемент находится внутри круглых скобок
         case SQUARE_OPENED_ROUND_OPENED:
-        case ROUND_OPENED:
-        {
+        case ROUND_OPENED: {
             insertElementToMap(roundElems, nextElement, element);
             element.clear();
             break;
         }
+        //Если квадрытные скобки закрылись
         case SQUARE_CLOSED: {
-            const int squareMultiplier = nextElement.toInt();
-            for(const QString &squareEl: squareElems.keys())
-            {
-                const int value = squareElems.value(squareEl);
-                if(value > 0 && squareMultiplier > 0)
-                    squareElems[squareEl] = value * squareMultiplier;
-                else if(value == 0 || squareMultiplier == 0)
-                    squareElems[squareEl] = value > 0 ? value : squareMultiplier;
-
-                if(resultMap.contains(squareEl))
-                    resultMap[squareEl] = resultMap[squareEl] + squareElems[squareEl];
-                else
-                    resultMap.insert(squareEl, squareMultiplier);
-            }
-            squareElems.clear();
+            squareClosed(nextElement, squareElems, resultMap);
             element.clear();
             break;
         }
+        //Если круглые скобки закрылись
         case SQUARE_OPENED_ROUND_CLOSED:
-        case ROUND_CLOSED:
-        {
-            const int roundMultiplier = nextElement.toInt();
-            for(const QString &roundEl: roundElems.keys())
-            {
-                const int value = roundElems.value(roundEl);
-                if(value > 0 && roundMultiplier > 0)
-                    roundElems[roundEl] = value * roundMultiplier;
-                else if(value == 0 || roundMultiplier == 0)
-                    roundElems[roundEl] = value > 0 ? value : roundMultiplier;
-
-                if(!squareElems.isEmpty())
-                {
-                    if(squareElems.contains(roundEl))
-                        squareElems[roundEl] = squareElems[roundEl] + roundElems[roundEl];
-                    else
-                        squareElems.insert(roundEl, roundMultiplier);
-                }
-                else
-                {
-                    if(resultMap.contains(roundEl))
-                        resultMap[roundEl] = resultMap[roundEl] + roundElems[roundEl];
-                    else
-                        resultMap.insert(roundEl, roundMultiplier);
-                }
-            }
-            roundElems.clear();
+        case ROUND_CLOSED: {
+            roundClosed(nextElement, roundElems, squareElems, resultMap);
             element.clear();
             break;
         }
@@ -152,7 +122,60 @@ void ChemicalModel::changeStatus(const QString el)
             _status = ROUND_CLOSED;
     }
     else {
-        if(_status == SQUARE_CLOSED || _status == ROUND_CLOSED)
+        if((_status == SQUARE_CLOSED || _status == ROUND_CLOSED) && el.toInt() == 0)
             _status = NO_BRACKETS;
     }
+}
+
+void ChemicalModel::squareClosed(const QString nextEl, QMap<QString, int> &squareElems, QMap<QString, int> &resultMap) const
+{
+    //множитель квадратных скобок
+    const int squareMultiplier = nextEl.toInt();
+    //перебор всех элементов внутри квадратных скобок
+    for(const QString &squareEl: squareElems.keys())
+    {
+        //кол-во итерируемого элемента
+        const int value = squareElems.value(squareEl);
+        if(value > 0 && squareMultiplier > 0)
+            squareElems[squareEl] = value * squareMultiplier;
+        else if(value == 0 || squareMultiplier == 0)
+            squareElems[squareEl] = value > 0 ? value : squareMultiplier;
+        //если результирующий массив имеет данный элемент
+        if(resultMap.contains(squareEl))
+            resultMap[squareEl] = resultMap[squareEl] + squareElems[squareEl];
+        else
+            resultMap.insert(squareEl, squareElems[squareEl]);
+    }
+    squareElems.clear();
+}
+
+void ChemicalModel::roundClosed(const QString nextEl, QMap<QString, int> &roundElems, QMap<QString, int> &squareElems, QMap<QString, int> &resultMap) const
+{
+    //множитель круглых скобок
+    const int roundMultiplier = nextEl.toInt();
+    for(const QString &roundEl: roundElems.keys())
+    {
+        //кол-во итерируемого элемента
+        const int value = roundElems.value(roundEl);
+        if(value > 0 && roundMultiplier > 0)
+            roundElems[roundEl] = value * roundMultiplier;
+        else if(value == 0 || roundMultiplier == 0)
+            roundElems[roundEl] = value > 0 ? value : roundMultiplier;
+        //Если круглые скобки не находятся внутри квадратных
+        if(!squareElems.isEmpty())
+        {
+            if(squareElems.contains(roundEl))
+                squareElems[roundEl] = squareElems[roundEl] + roundElems[roundEl];
+            else
+                squareElems.insert(roundEl, roundElems[roundEl]);
+        }
+        else
+        {
+            if(resultMap.contains(roundEl))
+                resultMap[roundEl] = resultMap[roundEl] + roundElems[roundEl];
+            else
+                resultMap.insert(roundEl, roundElems[roundEl]);
+        }
+    }
+    roundElems.clear();
 }
